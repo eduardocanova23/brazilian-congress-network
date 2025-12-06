@@ -28,12 +28,13 @@ class MinerFactory():
             "RolesMiner": RolesMiner(years=self.years, legislatures=self.legislatures),
             "TSEMiner": TSEMiner(years=self.years, legislatures=self.legislatures)
         }
-        print(self.miners)
+        print("MINERS RECEBIDOS:", self.miners)
         for miner in self.miners:
-            print("Extraindo dados de: {}".format(miner))
+            print("\n=== Iniciando minerador:", miner, "===")
             minerInstance = class_map[miner]
             if(miner == 'RolesMiner'):
                 minerInstance.setDates(self.start_date, self.end_date)
             minerInstance.mineData()
             minerInstance.createDataframe()
             minerInstance.save2CSV()
+        

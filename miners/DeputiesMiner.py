@@ -8,7 +8,7 @@ from .utils import printProgressBar
 class DeputiesMiner(Miner):
     api_legislature_info = "https://dadosabertos.camara.leg.br/api/v2/deputados?idLegislatura={legislature_number}&pagina={page_number}&itens=100&ordem=ASC&ordenarPor=nome&formato=json"
     api_deputy_info = "https://dadosabertos.camara.leg.br/api/v2/deputados/{deputy_id}?formato=json"
-    output_path = "../data/"
+    output_path = "./data/"
     deputies = {}
     data = None
 

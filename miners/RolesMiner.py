@@ -9,7 +9,7 @@ class RolesMiner(Miner):
     api_groups_info = "https://dadosabertos.camara.leg.br/api/v2/deputados/{deputy_id}/orgaos?dataInicio={data_inicio}&dataFim={data_fim}&itens=100&ordem=ASC&formato=json"
     api_mesa_info = "https://dadosabertos.camara.leg.br/api/v2/legislaturas/{legislature}/mesa?formato=json"
     download_link = "https://dadosabertos.camara.leg.br/arquivos/proposicoes/csv/proposicoes-{year}.csv"
-    output_path = "../data/roles/"
+    output_path = "./data/roles/"
     dates = {}
     deputies_list = []
     col_names = ['deputy_id', 'role_name', 'role_place_id', 'role_place_name']
@@ -33,16 +33,23 @@ class RolesMiner(Miner):
         pass
 
     def save2CSV(self):
-        self.df.to_csv('../data/roles_info.csv', header=True, index = False)
+        # garante que a pasta data existe
+        os.makedirs('./data', exist_ok=True)
+        full_path = os.path.abspath('./data/roles_info.csv')
+        print("Salvando roles_info.csv em:", full_path)
+        print("Número de linhas no df de cargos:", len(self.df))
+        self.df.to_csv(full_path, header=True, index=False)
 
     def getDeputiesList(self):
         return self.deputies_list
 
     def setDeputiesList(self):
-        with open('../data/deputies_info.csv') as csvfile:
+        with open('./data/deputies_info.csv', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
                 self.deputies_list.append(row['index'])
+
+
 
     def loadDeputiesGroups(self):
         for deputy_id in self.deputies_list:
@@ -73,7 +80,7 @@ class RolesMiner(Miner):
                 print("error: ", deputy_id)
     
     def loadDeputiesPartyRole(self):
-        with open('../data/parties_info.csv') as csvfile:
+        with open('./data/parties_info.csv', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
             role_model = "Líder do {party_name}"
             for row in reader:

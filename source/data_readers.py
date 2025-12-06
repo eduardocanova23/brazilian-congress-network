@@ -9,8 +9,13 @@ def getDeputies():
     
 
 def getInfoTSE():
-    tse_info = pd.read_csv("../data/candidates_tse_info.csv", sep=',')
-    tse_info['NR_CPF_CANDIDATO'].fillna(0.0).astype(int)
+    try:
+        tse_info = pd.read_csv("../data/candidates_tse_info.csv", sep=',', encoding='utf-8')
+    except FileNotFoundError:
+        print("Aviso: candidates_tse_info.csv não encontrado; prosseguindo sem atributos TSE.")
+        return {}
+
+    tse_info['NR_CPF_CANDIDATO'] = tse_info['NR_CPF_CANDIDATO'].fillna(0.0).astype(int)
     tse_info.set_index('NR_CPF_CANDIDATO', inplace=True)
     return tse_info.to_dict('index')
 
@@ -53,7 +58,20 @@ def getRoles():
 
 
 def getProposals():
-    df_proposals = pd.read_csv("../data/proposals_info.csv", sep=',')
-    df_proposals.set_index('id', inplace=True)
-    proposals_dict = df_proposals.to_dict('id')
-    return {int(k): v for k, v in proposals_dict.items()}
+    # lê o CSV garantindo UTF-8
+    df_proposals = pd.read_csv('../data/proposals_info.csv', encoding='utf-8')
+
+    # tira espaços/brancos dos nomes de coluna (e lida com BOM)
+    df_proposals.columns = df_proposals.columns.str.strip()
+
+    # tenta usar explicitamente a coluna 'id'
+    if 'id' in df_proposals.columns:
+        index_col = 'id'
+    else:
+        # se por algum motivo o nome estiver diferente (BOM etc),
+        # usa simplesmente a PRIMEIRA coluna como id
+        index_col = df_proposals.columns[0]
+        print("Aviso: coluna 'id' não encontrada, usando", index_col, "como índice em getProposals()")
+
+    proposals_dict = df_proposals.set_index(index_col).to_dict('index')
+    return proposals_dict

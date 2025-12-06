@@ -9,7 +9,7 @@ class PartiesMiner(Miner):
     api_parties_info = "https://dadosabertos.camara.leg.br/api/v2/partidos/{party_id}?formato=json"
     api_parties_list = "https://dadosabertos.camara.leg.br/api/v2/partidos?&pagina={page_number}&itens=100&ordem=ASC&ordenarPor=sigla&formato=json"
 
-    output_path = "../data/"
+    output_path = "./data/"
     parties = {}
     data = None
 

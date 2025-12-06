@@ -7,6 +7,7 @@ from .model_parameters import *
 from .data_readers import *
 import random
 import ast
+import os
 from datetime import date
 from .utils import calculateAge
 from .utils import getAgeRange
@@ -51,12 +52,54 @@ class NetworkBuilder():
         self.removePastDeputies()
 
     def saveNetWork(self, network_name="coauthorship-network", use_version=True):
+        import os
+        from datetime import datetime
+        import pandas as pd
+
         print("Salvando a rede...")
-        if(use_version):
-            nx.write_gexf(self.G, "../data/networks/{}-{}.gexf".format(network_name, date.today()))
+
+    # Sanear atributos: GEXF não aceita None
+        for node, data in self.G.nodes(data=True):
+            for k, v in list(data.items()):
+                if v is None:
+                    data[k] = ''  # ou 'NA', se preferir
+
+        for u, v, data in self.G.edges(data=True):
+            for k, vv in list(data.items()):
+                if vv is None:
+                    data[k] = ''
+
+    # Inferir anos a partir de ../data/proposals_info.csv
+        years_str = "unknown_years"
+        try:
+            props = pd.read_csv("../data/proposals_info.csv")
+            if "ano" in props.columns:
+                anos = sorted(props["ano"].dropna().unique())
+                if len(anos) > 0:
+                    years_str = "_".join(str(int(a)) for a in anos)
+        except Exception as e:
+            print("Aviso: não foi possível inferir anos a partir de proposals_info.csv:", e)
+
+    # Montar nome base
+        base_name = f"{network_name}-{years_str}"
+
+    # Adicionar timestamp se use_version=True
+        if use_version:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            filename = f"{base_name}-{timestamp}.gexf"
         else:
-            nx.write_gexf(self.G, "../data/networks/{}.gexf".format(network_name))
-        print("Rede salva em: {}".format("../data/networks/"))
+            filename = f"{base_name}.gexf"
+
+    # Garantir que a pasta ../data/networks exista
+        os.makedirs("../data/networks", exist_ok=True)
+
+    # Caminho final
+        path = os.path.join("../data/networks", filename)
+
+    # Salvar GEXF
+        nx.write_gexf(self.G, path)
+        print("Rede salva em: {}".format(path))
+
 
     def addNodes(self):
         print("Gerando vértices...")
@@ -72,8 +115,9 @@ class NetworkBuilder():
                 label = self.deputies[deputy_id]['name']
                 sex = self.deputies[deputy_id]['sex']
                 education = self.deputies[deputy_id]['education']
-                education_tse = self.tse_info[cpf]['DS_GRAU_INSTRUCAO']
-                ethnicity = self.tse_info[cpf]['DS_COR_RACA']
+                tse_record = self.tse_info.get(cpf, {}) if isinstance(self.tse_info, dict) else {}
+                education_tse = tse_record.get('DS_GRAU_INSTRUCAO')
+                ethnicity = tse_record.get('DS_COR_RACA')
                 age = calculateAge(self.deputies[deputy_id]['birthdate'])
                 age_range = getAgeRange(age)
 
@@ -109,10 +153,14 @@ class NetworkBuilder():
             )
     
     def removePastDeputies(self):
-        for deputy in self.G.nodes():
-            if(deputy not in self.deputies_ids):
-                self.G.remove_node(deputy)
+        nodes_to_remove = []
 
+        for deputy in list(self.G.nodes()):
+            if (deputy not in self.deputies_ids):
+                nodes_to_remove.append(deputy)
+  
+        self.G.remove_nodes_from(nodes_to_remove)
+            
     def setCollaborations(self):
         '''
         Define pesos das arestas de acordo com número de coautoria entre dois deputados

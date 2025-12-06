@@ -26,7 +26,7 @@ class APIProposalMiner(Miner):
     api_proposal_info = "https://dadosabertos.camara.leg.br/api/v2/proposicoes/{proposal_code}?formato=json"
     api_url = "https://dadosabertos.camara.leg.br/api/v2/proposicoes?&pagina={page_number}&itens=100&ordem=DESC&ordenarPor=ano&formato=json"
 
-    output_path = "../data/"
+    output_path = "./data/"
     proposals = {}
     data = None
 
