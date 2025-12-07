@@ -123,7 +123,7 @@ def resumo_coautoria_raw(ano: int):
 
 if __name__ == "__main__":
     # exemplo: rodar para um ano
-    ANO = 2023
+    ANO = 2024
     resumo_coautoria_raw(ANO)
 
     # se quiser para vários anos:

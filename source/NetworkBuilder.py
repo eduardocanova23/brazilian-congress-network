@@ -33,16 +33,41 @@ class NetworkBuilder():
 
     def __init__(self):
         print("Carregando informações...")
+
+    # Deputados "globais" (todas as legislaturas mineradas)
         self.deputies = getDeputies()
-        self.deputies_ids = list(self.deputies.keys())
+        all_deputy_ids = set(int(k) for k in self.deputies.keys())
+
+    # Proposições, cargos, partidos e autores dos ANOS selecionados
         self.proposals = getProposals()
         self.legislative_roles = getRoles()
         self.parties = getParties()
         self.proposal_authors = getAuthors()
         self.tse_info = getInfoTSE()
+
+    # Deputados que aparecem como autores nas proposições selecionadas
+        author_ids = set()
+        for authors in self.proposal_authors.values():
+            for a in authors:
+                try:
+                    author_ids.add(int(a))
+                except (ValueError, TypeError):
+                    continue
+
+    # Interseção: só entram na rede deputados que:
+    # - existem em deputies_info.csv
+    # - aparecem em authors_info.csv (anos que você escolheu)
+        self.deputies_ids = sorted(all_deputy_ids & author_ids)
+
+        print(f"Deputados em deputies_info: {len(all_deputy_ids)}")
+        print(f"Deputados que aparecem como autores (anos selecionados): {len(author_ids)}")
+        print(f"Deputados efetivamente usados na rede: {len(self.deputies_ids)}")
+
+        # A partir daqui, tudo usa só esses ids ativos
         self.setDeputiesRegion()
         self.setDeputiesIndividualProposals()
         self.setDeputiesRoleInfluence()
+
 
     def buildNetwork(self, weighted = True):
         self.weighted_network = weighted
@@ -162,19 +187,53 @@ class NetworkBuilder():
         self.G.remove_nodes_from(nodes_to_remove)
             
     def setCollaborations(self):
-        '''
-        Define pesos das arestas de acordo com número de coautoria entre dois deputados
-        '''
+        """
+        Define pesos das arestas de acordo com número de coautoria entre dois deputados.
+
+        Ajustes principais:
+        - usa apenas autores cujo id está em self.deputies_ids
+        - remove duplicados de autores por proposição
+        - ignora proposições com menos de 2 deputados válidos
+        """
+        deputies_set = set(self.deputies_ids)
+
+        print("Calculando coautorias (setCollaborations)...")
         for proposal_id in list(self.proposals.keys()):
-            if proposal_id in list(self.proposal_authors.keys()):
-                proposal_authors = self.proposal_authors[proposal_id]
-                proposal_type = self.proposals[proposal_id]['siglaTipo']
-                n_proposal_weight = proposal_weight[proposal_type]
-                # proposals with only one author add node weight and will not be considered agai
-                if(len(proposal_authors) > 1):
-                    self.collab_weights = self.addCollabEdge(
-                        self.collab_weights, proposal_authors, n_proposal_weight, False
-                    )
+            if proposal_id not in self.proposal_authors:
+                continue
+
+            # lista de autores bruta vinda de getAuthors()
+            proposal_authors = self.proposal_authors[proposal_id]
+
+            # filtrar só ids que existem em self.deputies_ids
+            filtered_authors = [a for a in proposal_authors if a in deputies_set]
+
+            # remover duplicados (caso o mesmo deputado apareça mais de uma vez)
+            filtered_authors = sorted(set(filtered_authors))
+
+            # se sobrou menos de 2, não gera aresta
+            if len(filtered_authors) <= 1:
+                continue
+
+            # tipo e peso da proposição
+            proposal_type = self.proposals[proposal_id]["siglaTipo"]
+            if proposal_type not in proposal_weight:
+                # se aparecer um tipo estranho, simplesmente ignora
+                continue
+
+            n_proposal_weight = proposal_weight[proposal_type]
+
+            # log opcional pra você identificar proposições "monstro"
+            if len(filtered_authors) >= 150:
+                print(
+                    f"[ALERTA] Proposição {proposal_id} tem {len(filtered_authors)} deputados autores "
+                    f"(tipo {proposal_type}) – vai gerar muitas arestas."
+                )
+
+            # acumular peso de colaboração
+            self.collab_weights = self.addCollabEdge(
+                self.collab_weights, filtered_authors, n_proposal_weight, False
+            )
 
     def addCollabEdge(self, graph, collab_list, proposal_weight, archived):
         '''
@@ -206,46 +265,83 @@ class NetworkBuilder():
         return graph
 
     def setCollaborationsSuccess(self):
-        '''
-        Define atributo de pertiência para cada aresta. Esse atributo representa os projetos entre dois deputados
-        que em algum nível foram aceitos pela c6amara
-        '''
+        """
+        Define atributo de pertinência para cada aresta. Esse atributo representa os projetos entre dois deputados
+        que em algum nível foram aceitos pela câmara.
+
+        Ajustes:
+        - mesmo filtro de autores válidos e deduplicação usado em setCollaborations
+        """
+        deputies_set = set(self.deputies_ids)
+
+        print("Calculando pertinência das coautorias (setCollaborationsSuccess)...")
         for proposal_id in list(self.proposals.keys()):
-            if proposal_id in list(self.proposal_authors.keys()):
-                proposal_authors = self.proposal_authors[proposal_id]
-                proposal_type = self.proposals[proposal_id]['siglaTipo']
-                proposal_status = int(self.proposals[proposal_id]['ultimoStatus_idSituacao'])
-                n_proposal_weight = proposal_weight[proposal_type]
+            if proposal_id not in self.proposal_authors:
+                continue
 
-                status_pertinence = 0
-                for status in positive_proposal_status:
-                    if(int(proposal_status) == status['status_code']):
-                        status_pertinence = status['positive_pertinence']
+            proposal_authors = self.proposal_authors[proposal_id]
+            filtered_authors = [a for a in proposal_authors if a in deputies_set]
+            filtered_authors = sorted(set(filtered_authors))
 
-                pertinence_weighted = n_proposal_weight * status_pertinence
-                # proposals with only one author add node weight and will not be considered agai
-                if(len(proposal_authors) > 1):
-                    self.collab_pertinence = self.addCollabPertinence(
-                        self.collab_pertinence, proposal_authors, pertinence_weighted
-                    )
+            if len(filtered_authors) <= 1:
+                continue
+
+            proposal = self.proposals[proposal_id]
+            proposal_type = proposal["siglaTipo"]
+            if proposal_type not in proposal_weight:
+                continue
+
+            proposal_status = int(proposal["ultimoStatus_idSituacao"])
+            n_proposal_weight = proposal_weight[proposal_type]
+
+            status_pertinence = 0
+            for status in positive_proposal_status:
+                if int(proposal_status) == status["status_code"]:
+                    status_pertinence = status["positive_pertinence"]
+                    break
+
+            pertinence_weighted = n_proposal_weight * status_pertinence
+
+            self.collab_pertinence = self.addCollabPertinence(
+                self.collab_pertinence, filtered_authors, pertinence_weighted
+            )
 
     def setDeputiesIndividualProposals(self):
-        '''
-        Propostas individuais escritas por um deputado e ponderadas por peso de acordo com seu tipo
-        '''
+        """
+        Propostas individuais escritas por um deputado e ponderadas por peso de acordo com seu tipo.
+
+        Ajustes:
+        - considera apenas deputados em self.deputies_ids
+        - garante que só propostas com exatamente 1 deputado válido contam como "individuais"
+        """
+        deputies_set = set(self.deputies_ids)
         deputies_weight = {}
-        for proposal_id in list(self.proposal_authors.keys()):
-            authors_list = self.proposal_authors[proposal_id]
-            n_authors = len(authors_list)
-            # checks if the proposal have only one author
-            if (n_authors == 1 and (proposal_id in list(self.proposals.keys()))):
-                author_id = authors_list[0]
-                proposal_type = self.proposals[proposal_id]['siglaTipo']
-                n_proposal_weight = proposal_weight[proposal_type]
-                if(author_id in deputies_weight):
-                    deputies_weight[author_id] += n_proposal_weight
-                else:
-                    deputies_weight[author_id] = n_proposal_weight
+
+        print("Calculando propostas individuais (setDeputiesIndividualProposals)...")
+        for proposal_id, authors_list in self.proposal_authors.items():
+            if proposal_id not in self.proposals:
+                continue
+
+            # filtrar só deputados válidos
+            filtered_authors = [a for a in authors_list if a in deputies_set]
+            filtered_authors = sorted(set(filtered_authors))
+
+            # só conta como individual se sobrou exatamente 1 deputado
+            if len(filtered_authors) != 1:
+                continue
+
+            author_id = filtered_authors[0]
+            proposal_type = self.proposals[proposal_id]["siglaTipo"]
+            if proposal_type not in proposal_weight:
+                continue
+
+            n_proposal_weight = proposal_weight[proposal_type]
+
+            if author_id in deputies_weight:
+                deputies_weight[author_id] += n_proposal_weight
+            else:
+                deputies_weight[author_id] = n_proposal_weight
+
         self.deputies_proposals = deputies_weight
 
     def setDeputiesIndividualSuccessProposals(self):
