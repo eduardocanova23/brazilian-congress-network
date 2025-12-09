@@ -61,7 +61,8 @@ DeputiesMiner -> deputados ativos,
 PartiesMiner -> partidos representados,
 ProposalsMiner -> proposições apresentadas,
 RolesMiner -> cargos dos deputados,
-TSEMiner -> características pessoais.
+TSEMiner -> características pessoais,
+VotesMiner -> votações e votos nominais por deputado (para rede de covotação).
 """
 )
 @click.option(

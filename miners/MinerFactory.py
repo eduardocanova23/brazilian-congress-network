@@ -6,7 +6,7 @@ from .PartiesMiner import PartiesMiner
 from .ProposalsMiner import ProposalsMiner
 from .RolesMiner import RolesMiner
 from .TSEMiner import TSEMiner
-
+from .VotesMiner import VotesMiner
 
 class MinerFactory():
     config = None
@@ -26,7 +26,8 @@ class MinerFactory():
             "PartiesMiner": PartiesMiner(years=self.years, legislatures=self.legislatures),
             "ProposalsMiner": ProposalsMiner(years=self.years, legislatures=self.legislatures),
             "RolesMiner": RolesMiner(years=self.years, legislatures=self.legislatures),
-            "TSEMiner": TSEMiner(years=self.years, legislatures=self.legislatures)
+            "TSEMiner": TSEMiner(years=self.years, legislatures=self.legislatures),
+            "VotesMiner": VotesMiner(years=self.years, legislatures=self.legislatures)
         }
         print("MINERS RECEBIDOS:", self.miners)
         for miner in self.miners:
