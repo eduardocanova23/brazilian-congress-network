@@ -14,8 +14,8 @@ class CovotingNetworkBuilder:
         - arestas: peso = número de votações divisivas em que votaram igual
 
     Depende de:
-        ./data/deputies_info.csv   (lido via getDeputies())
-        ./data/votes_detail_info.csv
+      - ./data/votes_detail_info.csv (gerado pelo VotesMiner, já com filtro de 60%)
+      - ./data/deputies_info.csv (lido via getDeputies)
     """
 
     def __init__(self,
@@ -34,7 +34,6 @@ class CovotingNetworkBuilder:
         print(f"Deputados em deputies_info: {len(self.deputies_ids)}")
 
         # Carrega votos detalhados
-        print(f"Carregando votos detalhados de {self.votes_detail_path}...")
         if not os.path.exists(self.votes_detail_path):
             raise FileNotFoundError(
                 f"Arquivo de votos detalhados não encontrado: {self.votes_detail_path}"
@@ -45,54 +44,65 @@ class CovotingNetworkBuilder:
 
         self.G = nx.Graph()
 
-    def _normalize_columns(self):
-        """
-        Ajusta nomes padrão de colunas internas para o layout real de
-        votes_detail_info.csv gerado pelo VotesMiner.
-
-        Colunas obrigatórias detectadas:
-            - idVotacao
-            - deputado_id
-            - voto
-        """
-        required = ["idVotacao", "deputado_id", "voto"]
-
-        for col in required:
-            if col not in self.votes_detail.columns:
-                raise ValueError(
-                    f"Coluna obrigatória '{col}' não encontrada.\n"
-                    f"Colunas disponíveis: {list(self.votes_detail.columns)}"
-                )
-
         self.col_vote_id = "idVotacao"
         self.col_deputy_id = "deputado_id"
         self.col_vote_type = "voto"
 
+        self._fix_column_names()
+
+    def _fix_column_names(self):
+        # Compatibilidade com colunas antigas se existirem
+        rename_map = {}
+        if "id votação" in self.votes_detail.columns:
+            rename_map["id votação"] = self.col_vote_id
+        if "id deputado" in self.votes_detail.columns:
+            rename_map["id deputado"] = self.col_deputy_id
+        if "tipo voto" in self.votes_detail.columns:
+            rename_map["tipo voto"] = self.col_vote_type
+
+        if rename_map:
+            self.votes_detail.rename(columns=rename_map, inplace=True)
+
+        # Garante que as colunas necessárias existam
+        missing = [c for c in [self.col_vote_id, self.col_deputy_id, self.col_vote_type]
+                   if c not in self.votes_detail.columns]
+        if missing:
+            raise ValueError(f"Colunas ausentes em votes_detail_info.csv: {missing}")
+
         print("Colunas fixadas para votes_detail_info.csv:")
-        print(f"  id votação  -> {self.col_vote_id}")
-        print(f"  id deputado -> {self.col_deputy_id}")
-        print(f"  tipo voto   -> {self.col_vote_type}")
+        for old, new in rename_map.items():
+            print(f"  {old}  -> {new}")
+
+    def _normalize_columns(self):
+        # Normaliza strings de voto
+        self.votes_detail[self.col_vote_type] = (
+            self.votes_detail[self.col_vote_type].astype(str).str.strip()
+        )
 
     def build_network(self):
         self._normalize_columns()
 
+        # 1) Universo completo de nós:
+        #    - todos os deputados em deputies_info.csv
+        #    - mais todos que aparecem no votes_detail_info.csv (qualquer tipo de voto)
+        df_all = self.votes_detail.copy()
+        df_all[self.col_vote_type] = df_all[self.col_vote_type].astype(str).str.strip()
+
+        df_all[self.col_deputy_id] = pd.to_numeric(
+            df_all[self.col_deputy_id],
+            errors="coerce"
+        ).astype("Int64")
+        df_all = df_all.dropna(subset=[self.col_deputy_id])
+        df_all[self.col_deputy_id] = df_all[self.col_deputy_id].astype(int)
+
+        print("Adicionando nós (incluindo grau 0)...")
+        self._add_nodes_universe(df_all)
+
+        # 2) Arestas continuam restritas a Sim/Não
         print("Filtrando apenas votos relevantes (Sim/Não)...")
-        df = self.votes_detail.copy()
-        df[self.col_vote_type] = df[self.col_vote_type].astype(str).str.strip()
-
-        df = df[df[self.col_vote_type].isin(self.consider_votes)]
-
-        # Convert para int e filtra
-        df[self.col_deputy_id] = pd.to_numeric(df[self.col_deputy_id],
-                                               errors="coerce").astype("Int64")
-        df = df.dropna(subset=[self.col_deputy_id])
-        df[self.col_deputy_id] = df[self.col_deputy_id].astype(int)
-
+        df = df_all[df_all[self.col_vote_type].isin(self.consider_votes)].copy()
 
         print(f"Votos após filtro: {len(df)}")
-
-        print("Adicionando nós...")
-        self._add_nodes(df)
 
         print("Calculando pares de covotação...")
         self._add_edges(df)
@@ -100,21 +110,26 @@ class CovotingNetworkBuilder:
         print("Rede construída.")
         print(f"Nós: {self.G.number_of_nodes()}, arestas: {self.G.number_of_edges()}")
 
-    def _add_nodes(self, df_votes):
+    def _add_nodes_universe(self, df_votes_all):
         """
-        Cria nós na rede para todos os deputados que aparecem em df_votes.
+        Adiciona nós para um universo amplo, sem alterar a regra das arestas.
 
-        Regra:
-          - Se o deputado existir em self.deputies (deputies_info.csv),
-            usa os atributos completos (como na NetworkBuilder).
-          - Se NÃO existir em self.deputies, cria mesmo assim,
-            usando os atributos disponíveis em votes_detail_info.csv.
+        Nós incluídos:
+          - todos os deputados presentes em deputies_info.csv (self.deputies)
+          - todos os deputados que aparecem em votes_detail_info.csv, mesmo com votos fora de Sim/Não
+
+        Resultado: deputados sem votos Sim/Não (ou ausentes das votações divisivas) entram com grau 0.
         """
-        deputies_in_votes = sorted(df_votes[self.col_deputy_id].unique())
+        universe_ids = set(self.deputies_ids)
+        universe_ids.update(df_votes_all[self.col_deputy_id].unique().tolist())
 
-        for deputy_id in deputies_in_votes:
+        universe_ids = sorted(int(x) for x in universe_ids)
+
+        for deputy_id in universe_ids:
+            if deputy_id in self.G:
+                continue
+
             if deputy_id in self.deputies:
-                # Caminho "completo": usamos deputies_info.csv
                 dep = self.deputies[deputy_id]
 
                 cpf = dep.get("cpf")
@@ -130,17 +145,20 @@ class CovotingNetworkBuilder:
                 age_range = getAgeRange(age) if age is not None else None
 
             else:
-                # Caminho "fallback": o deputado não está em deputies_info.csv.
-                # Usamos o que estiver disponível em votes_detail_info.csv.
-                sub = df_votes[df_votes[self.col_deputy_id] == deputy_id]
+                # Fallback: tenta usar atributos disponíveis no votes_detail_info.csv
+                sub = df_votes_all[df_votes_all[self.col_deputy_id] == deputy_id]
+                if len(sub) > 0:
+                    row = sub.iloc[0]
+                    label = row.get("deputado_nome", str(deputy_id))
+                    party = row.get("deputado_siglaPartido", "")
+                    uf = row.get("deputado_siglaUf", "")
+                    region = getUfRegion(uf) if uf else ""
+                else:
+                    label = str(deputy_id)
+                    party = ""
+                    uf = ""
+                    region = ""
 
-                # Pega uma linha qualquer desse deputado
-                row = sub.iloc[0]
-
-                label = row.get("deputado_nome", str(deputy_id))
-                party = row.get("deputado_siglaPartido", "")
-                uf = row.get("deputado_siglaUf", "")
-                region = getUfRegion(uf) if uf else ""
                 sex = ""
                 education = ""
                 cpf = ""
@@ -159,48 +177,91 @@ class CovotingNetworkBuilder:
                 age_range=age_range,
             )
 
+    def _add_nodes(self, df_votes):
+        """
+        Mantido por compatibilidade: cria nós só para deputados presentes em df_votes.
+        (Não é mais usado como universo principal, pois agora usamos _add_nodes_universe.)
+        """
+        deputies_in_votes = sorted(df_votes[self.col_deputy_id].unique())
+
+        for deputy_id in deputies_in_votes:
+            if deputy_id in self.deputies:
+                dep = self.deputies[deputy_id]
+
+                cpf = dep.get("cpf")
+                party = dep.get("party")
+                uf = dep.get("uf")
+                region = dep.get("region") or getUfRegion(uf)
+                label = dep.get("name")
+                sex = dep.get("sex")
+                education = dep.get("education")
+                birthdate = dep.get("birthdate")
+
+                age = calculateAge(birthdate) if birthdate else None
+                age_range = getAgeRange(age) if age is not None else None
+
+            else:
+                sub = df_votes[df_votes[self.col_deputy_id] == deputy_id]
+                if len(sub) > 0:
+                    row = sub.iloc[0]
+                    label = row.get("deputado_nome", str(deputy_id))
+                    party = row.get("deputado_siglaPartido", "")
+                    uf = row.get("deputado_siglaUf", "")
+                    region = getUfRegion(uf) if uf else ""
+                else:
+                    label = str(deputy_id)
+                    party = ""
+                    uf = ""
+                    region = ""
+
+                sex = ""
+                education = ""
+                age = None
+                age_range = None
+
+            self.G.add_node(
+                deputy_id,
+                label=label,
+                party=party,
+                uf=uf,
+                region=region,
+                sex=sex,
+                education=education,
+                age=age,
+                age_range=age_range,
+            )
 
     def _add_edges(self, df_votes):
-        from itertools import combinations
+        # Agrupa por votação, e cria pares entre deputados que votaram igual
+        grouped = df_votes.groupby(self.col_vote_id)
 
-        edge_weights = {}
+        for _, group in grouped:
+            deputies = group[self.col_deputy_id].tolist()
+            votes = group[self.col_vote_type].tolist()
 
-        # Agrupa por votação
-        for vote_id, df_vot in df_votes.groupby(self.col_vote_id):
-            # Agrupa por tipo de voto
-            for vote_type, df_group in df_vot.groupby(self.col_vote_type):
-                deputies = sorted(df_group[self.col_deputy_id].unique())
-                if len(deputies) <= 1:
-                    continue
-
-                for a, b in combinations(deputies, 2):
-                    if a == b:
+            n = len(deputies)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    if votes[i] != votes[j]:
                         continue
-                    edge = (min(a, b), max(a, b))
-                    edge_weights[edge] = edge_weights.get(edge, 0) + 1
 
-        # Adiciona arestas
-        for (u, v), w in edge_weights.items():
-            if w < self.min_common_votes:
-                continue
-            self.G.add_edge(u, v, weight=w)
+                    u = deputies[i]
+                    v = deputies[j]
+
+                    if self.G.has_edge(u, v):
+                        self.G[u][v]["weight"] += 1
+                    else:
+                        self.G.add_edge(u, v, weight=1)
+
+    def sanitize(self):
+        # Mantido caso você use em outras partes do fluxo
+        # Aqui não removemos nós isolados (você quer grau 0)
+        pass
 
     def save_network(self,
+                     output_dir: str = "../data/networks",
                      network_name: str = "covoting-network",
-                     use_version: bool = True,
-                     output_dir: str = "./data/networks"):
-
-        print("Sanitizando atributos e salvando rede em GEXF...")
-
-        for _, data in self.G.nodes(data=True):
-            for k, v in list(data.items()):
-                if v is None:
-                    del data[k]
-
-        for _, _, data in self.G.edges(data=True):
-            for k, v in list(data.items()):
-                if v is None:
-                    del data[k]
+                     use_version: bool = True):
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -214,4 +275,3 @@ class CovotingNetworkBuilder:
         path = os.path.join(output_dir, filename)
         nx.write_gexf(self.G, path)
         print(f"Rede salva em: {path}")
-

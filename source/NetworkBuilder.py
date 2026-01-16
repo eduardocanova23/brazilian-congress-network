@@ -57,11 +57,11 @@ class NetworkBuilder():
     # Interseção: só entram na rede deputados que:
     # - existem em deputies_info.csv
     # - aparecem em authors_info.csv (anos que você escolheu)
-        self.deputies_ids = sorted(all_deputy_ids & author_ids)
+        self.deputies_ids = sorted(all_deputy_ids | author_ids)
 
         print(f"Deputados em deputies_info: {len(all_deputy_ids)}")
         print(f"Deputados que aparecem como autores (anos selecionados): {len(author_ids)}")
-        print(f"Deputados efetivamente usados na rede: {len(self.deputies_ids)}")
+        print(f"Deputados efetivamente usados na rede (união Lucas): {len(self.deputies_ids)}")
 
         # A partir daqui, tudo usa só esses ids ativos
         self.setDeputiesRegion()
@@ -74,7 +74,6 @@ class NetworkBuilder():
         self.G = nx.Graph()
         self.addNodes()
         self.addEdges()
-        self.removePastDeputies()
 
     def saveNetWork(self, network_name="coauthorship-network", use_version=True):
         import os
@@ -131,38 +130,72 @@ class NetworkBuilder():
         out_of_date_deputies = []
 
         for deputy_id in self.deputies_ids:
-            if (int(deputy_id) in list(self.deputies.keys())):
-                deputy_id = int(deputy_id)
-                cpf = self.deputies[deputy_id]['cpf']
-                party = self.deputies[deputy_id]['party']
-                uf = self.deputies[deputy_id]['uf']
-                region = self.deputies[deputy_id]['region']
-                label = self.deputies[deputy_id]['name']
-                sex = self.deputies[deputy_id]['sex']
-                education = self.deputies[deputy_id]['education']
+            deputy_id = int(deputy_id)
+
+            if deputy_id in self.deputies:
+                cpf = self.deputies[deputy_id].get('cpf')
+                party = self.deputies[deputy_id].get('party', '')
+                uf = self.deputies[deputy_id].get('uf', '')
+                region = self.deputies[deputy_id].get('region', '')
+                label = self.deputies[deputy_id].get('name', '')
+                sex = self.deputies[deputy_id].get('sex', '')
+                education = self.deputies[deputy_id].get('education', '')
+                birthdate = self.deputies[deputy_id].get('birthdate')
+
                 tse_record = self.tse_info.get(cpf, {}) if isinstance(self.tse_info, dict) else {}
-                education_tse = tse_record.get('DS_GRAU_INSTRUCAO')
-                ethnicity = tse_record.get('DS_COR_RACA')
-                age = calculateAge(self.deputies[deputy_id]['birthdate'])
-                age_range = getAgeRange(age)
+                education_tse = tse_record.get('DS_GRAU_INSTRUCAO', '')
+                ethnicity = tse_record.get('DS_COR_RACA', '')
 
-                if (deputy_id in self.deputies_proposals):
-                    individual_proposals = self.deputies_proposals[deputy_id] * node_parameters['proposal']
-                else:
-                    individual_proposals = 0
+                age = calculateAge(birthdate) if birthdate else ''
+                age_range = getAgeRange(age) if age != '' else ''
 
-                if (deputy_id in self.roles_relevance):
-                    role_relevance = self.roles_relevance[deputy_id] * node_parameters['role']
-                else:
-                    role_relevance = 0
+                individual_proposals = (
+                    self.deputies_proposals.get(deputy_id, 0) * node_parameters['proposal']
+                )
+
+                role_relevance = (
+                    self.roles_relevance.get(deputy_id, 0) * node_parameters['role']
+                )
+
                 deputy_weight = individual_proposals + role_relevance
+
                 self.G.add_node(
-                    deputy_id, label=label, style='filled', weight=deputy_weight, party=party, uf=uf,
-                    age_range=age_range, sex=sex, education=education, age=age,
-                    education_tse=education_tse, ethnicity=ethnicity, region=region
-                    )
+                    deputy_id,
+                    label=label,
+                    style='filled',
+                    weight=deputy_weight,
+                    party=party,
+                    uf=uf,
+                    age_range=age_range,
+                    sex=sex,
+                    education=education,
+                    age=age,
+                    education_tse=education_tse,
+                    ethnicity=ethnicity,
+                    region=region
+                )
+
             else:
+                # Autor que apareceu nas proposições, mas não está em deputies_info
+                self.G.add_node(
+                    deputy_id,
+                    label=str(deputy_id),
+                    style='filled',
+                    weight=0,
+                    party='',
+                    uf='',
+                    age_range='',
+                    sex='',
+                    education='',
+                    age='',
+                    education_tse='',
+                    ethnicity='',
+                    region=''
+                )
                 out_of_date_deputies.append(deputy_id)
+
+        print("Deputados fora de deputies_info adicionados como nós:", len(out_of_date_deputies))
+
 
     def addEdges(self):
         print("Adicionando arestas...")
@@ -398,9 +431,8 @@ class NetworkBuilder():
         self.roles_relevance = deputies_weight
 
     def setDeputiesRegion(self):
-        '''
-        Com base na unidade da federação do deputado, adiciona a região a qual ele pertence
-        '''
+    
         for deputy_id in self.deputies_ids:
-            uf = self.deputies[deputy_id]['uf']
-            self.deputies[deputy_id]['region'] = getUfRegion(uf)
+            if deputy_id in self.deputies and "uf" in self.deputies[deputy_id]:
+                uf = self.deputies[deputy_id]["uf"]
+                self.deputies[deputy_id]["region"] = getUfRegion(uf)

@@ -8,38 +8,25 @@ class VotesMiner(Miner):
     """
     Baixa e prepara dados de votações e votos por parlamentar.
 
-    Lógica principal:
-      - Para cada ano em self.years:
-        1) Baixa votacoes-{ano}.csv (placar agregado)
-        2) Baixa votacoesVotos-{ano}.csv (votos por deputado)
-      - Usa o arquivo de votações para:
-        * calcular quão "divisiva" foi cada votação
-        * manter apenas votações com:
-            - total de votos válidos (Sim + Não) >= min_total_votes
-            - lado vencedor com participação <= division_threshold (ex: 0.7)
-      - Filtra o arquivo de votos detalhados para manter somente essas votações.
-      - Concatena tudo em:
-          ./data/votes_info.csv          -> resumo das votações divisivas
-          ./data/votes_detail_info.csv   -> votos dos deputados nessas votações
+    Também gera um mapa simples de proposições que aparecem no arquivo de votações
+    (isto é, que tiveram alguma votação registrada no período):
+      - ./data/proposals_voted_map.csv com coluna idProposicao
     """
 
-    # Arquivos agregados de votações por ano
     summary_link = "https://dadosabertos.camara.leg.br/arquivos/votacoes/csv/votacoes-{year}.csv"
-
-    # Votos nominais por parlamentar, por ano
     detail_link = "https://dadosabertos.camara.leg.br/arquivos/votacoesVotos/csv/votacoesVotos-{year}.csv"
 
-    # Pasta para armazenar os CSVs brutos baixados por ano
     output_raw_path = "./data/votes/raw/"
 
     # Parâmetros do filtro de "votação divisiva"
     division_threshold = 0.60     # máximo da fração de Sim ou Não
-    min_total_votes = 20           # mínimo de votos válidos (Sim + Não)
+    min_total_votes = 20          # mínimo de votos válidos (Sim + Não)
 
     def __init__(self, years=None, legislatures=None):
         super().__init__(years, legislatures)
         self.votes_summary = []
         self.votes_detail = []
+        self.proposals_voted_rows = []
 
     def mineData(self):
         """
@@ -76,8 +63,10 @@ class VotesMiner(Miner):
         """
         Lê os CSVs brutos e gera dois dataframes consolidados:
           - self.votes_summary: apenas votações "divisivas"
-          - self.votes_detail: votos dos deputados nessas votações
-        O filtro de divisividade é feito aqui, antes de mexer com a rede.
+          - self.votes_detail: votos dos deputados nessas votações filtradas
+
+        Em paralelo, constrói um mapa de idProposicao que aparecem no arquivo
+        votacoes-{ano}.csv (indício de proposição votada no período).
         """
         for year in self.years:
             summary_path = os.path.join(self.output_raw_path, f"votacoes-{year}.csv")
@@ -88,67 +77,60 @@ class VotesMiner(Miner):
             if not os.path.exists(detail_path):
                 raise FileNotFoundError(f"Arquivo não encontrado: {detail_path}")
 
-            # Normalmente o separador da Câmara é ponto e vírgula
-            df_sum = pd.read_csv(summary_path, sep=";")
+            df_sum = pd.read_csv(summary_path, sep=";", low_memory=False)
+            df_det = pd.read_csv(detail_path, sep=";", low_memory=False)
 
-            # As colunas abaixo vêm da documentação oficial de votações:
-            #  - id
-            #  - votosSim
-            #  - votosNao
-            #  - votosOutros
-            # Se algum nome estiver diferente na prática, isso vai explodir aqui
-            # e a gente ajusta depois olhando as colunas reais.
-            expected_cols = ["id", "votosSim", "votosNao"]
-            for col in expected_cols:
-                if col not in df_sum.columns:
+            # 1) Construir mapa de proposições com votação (antes de qualquer filtro)
+            prop_col = "ultimaApresentacaoProposicao_idProposicao"
+            if prop_col in df_sum.columns:
+                tmp = df_sum[[prop_col]].dropna().copy()
+                tmp[prop_col] = tmp[prop_col].astype(int)
+                tmp["ano_votacao"] = year
+                self.proposals_voted_rows.append(tmp)
+            else:
+                print(
+                    f"Aviso: coluna {prop_col} não encontrada em {summary_path}. "
+                    "Mapa proposals_voted_map pode ficar incompleto."
+                )
+
+            # 2) Filtro de votações divisivas
+            required_cols = ["id", "votosSim", "votosNao"]
+            for c in required_cols:
+                if c not in df_sum.columns:
                     raise ValueError(
-                        f"Coluna esperada '{col}' não encontrada em {summary_path}.\n"
+                        f"Não encontrei coluna {c} em {summary_path}. "
                         f"Colunas disponíveis: {list(df_sum.columns)}"
                     )
 
-            df_sum["votosSim"] = df_sum["votosSim"].fillna(0).astype(int)
-            df_sum["votosNao"] = df_sum["votosNao"].fillna(0).astype(int)
+            df_sum["votosSim"] = pd.to_numeric(df_sum["votosSim"], errors="coerce").fillna(0).astype(int)
+            df_sum["votosNao"] = pd.to_numeric(df_sum["votosNao"], errors="coerce").fillna(0).astype(int)
 
-            if "votosOutros" in df_sum.columns:
-                df_sum["votosOutros"] = df_sum["votosOutros"].fillna(0).astype(int)
-            else:
-                # Garante a coluna mesmo que não exista no arquivo
-                df_sum["votosOutros"] = 0
-
-            # Total de votos válidos: só Sim + Não (padrão para ver polarização)
             df_sum["total_validos"] = df_sum["votosSim"] + df_sum["votosNao"]
-            df_sum = df_sum[df_sum["total_validos"] > 0]
+            df_sum = df_sum[df_sum["total_validos"] >= self.min_total_votes].copy()
 
-            # Fração do lado vencedor
-            max_share = df_sum[["votosSim", "votosNao"]].max(axis=1) / df_sum["total_validos"]
+            if len(df_sum) == 0:
+                continue
 
-            # Filtro de "votação divisiva"
-            mask_divisive = (
-                (df_sum["total_validos"] >= self.min_total_votes)
-                & (max_share <= self.division_threshold)
-            )
+            df_sum["frac_sim"] = df_sum["votosSim"] / df_sum["total_validos"]
+            df_sum["frac_nao"] = df_sum["votosNao"] / df_sum["total_validos"]
 
-            df_sum_div = df_sum[mask_divisive].copy()
+            df_sum_div = df_sum[
+                (df_sum["frac_sim"] <= self.division_threshold) &
+                (df_sum["frac_nao"] <= self.division_threshold)
+            ].copy()
 
-            print(
-                f"Ano {year}: {len(df_sum)} votações no total, "
-                f"{len(df_sum_div)} após filtro de divisividade."
-            )
+            if len(df_sum_div) == 0:
+                continue
 
-            # Agora filtra o arquivo com votos nominais
-            df_det = pd.read_csv(detail_path, sep=";")
-
-            # A coluna de id da votação no arquivo de votos costuma ser algo como
-            # 'idVotacao'. Para não chutar muito, tentamos alguns candidatos.
+            # Achar nome da coluna de id de votação no detalhe
             id_col_detail = None
-            for candidate in ["idVotacao", "idvotacao", "id_votacao"]:
-                if candidate in df_det.columns:
-                    id_col_detail = candidate
+            for cand in ["idVotacao", "idVotação", "idVotacao", "id"]:
+                if cand in df_det.columns:
+                    id_col_detail = cand
                     break
-
             if id_col_detail is None:
                 raise ValueError(
-                    f"Não encontrei coluna de id de votação em {detail_path}.\n"
+                    f"Não encontrei coluna de id de votação em {detail_path}. "
                     f"Colunas: {list(df_det.columns)}"
                 )
 
@@ -165,22 +147,32 @@ class VotesMiner(Miner):
     def save2CSV(self):
         """
         Salva:
-          - ./data/votes_info.csv          (resumo das votações divisivas)
-          - ./data/votes_detail_info.csv   (votos dos deputados nas votações filtradas)
+          - ./data/votes_info.csv            (resumo das votações divisivas)
+          - ./data/votes_detail_info.csv     (votos dos deputados nas votações filtradas)
+          - ./data/proposals_voted_map.csv   (ids de proposições que tiveram votação registrada no período)
         """
-        if not self.votes_summary or not self.votes_detail:
-            print("VotesMiner: nada para salvar, execute createDataframe() primeiro.")
-            return
-
         os.makedirs("./data", exist_ok=True)
 
-        summary = pd.concat(self.votes_summary, ignore_index=True)
-        detail = pd.concat(self.votes_detail, ignore_index=True)
+        # 1) Salvar votes_info e votes_detail_info (apenas divisivas, como antes)
+        if self.votes_summary and self.votes_detail:
+            summary = pd.concat(self.votes_summary, ignore_index=True)
+            detail = pd.concat(self.votes_detail, ignore_index=True)
 
-        summary.to_csv("./data/votes_info.csv", index=False)
-        detail.to_csv("./data/votes_detail_info.csv", index=False)
+            summary.to_csv("./data/votes_info.csv", index=False)
+            detail.to_csv("./data/votes_detail_info.csv", index=False)
 
-        print(f"Resumo de votações salvo em ./data/votes_info.csv "
-              f"com {len(summary)} linhas.")
-        print(f"Votos por deputado salvos em ./data/votes_detail_info.csv "
-              f"com {len(detail)} linhas.")
+            print(f"Resumo de votações salvo em ./data/votes_info.csv com {len(summary)} linhas.")
+            print(f"Votos por deputado salvos em ./data/votes_detail_info.csv com {len(detail)} linhas.")
+        else:
+            print("VotesMiner: nenhuma votação divisiva para salvar em votes_info/votes_detail_info.")
+
+        # 2) Salvar proposals_voted_map (todas as proposições que aparecem nas votações)
+        if self.proposals_voted_rows:
+            voted = pd.concat(self.proposals_voted_rows, ignore_index=True)
+            voted = voted.rename(columns={"ultimaApresentacaoProposicao_idProposicao": "idProposicao"})
+            voted = voted[["idProposicao"]].drop_duplicates().sort_values("idProposicao")
+
+            voted.to_csv("./data/proposals_voted_map.csv", index=False)
+            print(f"Mapa de proposições votadas salvo em ./data/proposals_voted_map.csv com {len(voted)} ids.")
+        else:
+            print("VotesMiner: nenhum idProposicao coletado para proposals_voted_map.csv.")
